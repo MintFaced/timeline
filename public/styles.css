@@ -197,7 +197,7 @@ button:disabled {
 
 @media (min-width: 800px) {
   .form-grid {
-    grid-template-columns: 1fr 1fr 140px;
+    grid-template-columns: 1fr 1fr 1fr 140px;
     align-items: end;
   }
 }

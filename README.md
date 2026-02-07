@@ -1,6 +1,7 @@
 # Artist Timeline (Allium + Ethereum)
 
-Minimal web app that builds a left-to-right timeline of milestone events for one or more Ethereum NFT contracts.
+Minimal web app that builds a left-to-right timeline of milestone events for an Ethereum artist wallet (or `.eth`
+name), with optional NFT contract filters.
 
 ## Milestones
 
@@ -25,10 +26,12 @@ Then open `http://localhost:3000`.
 
 ## API
 
-- `GET /api/timeline?artist=Name&chain=ethereum&contracts=0x...,0x...`
+- `GET /api/timeline?artist=Name&chain=ethereum&wallet=mintface.eth`
+- `GET /api/timeline?artist=Name&chain=ethereum&wallet=0x...&contracts=0x...,0x...`
 - `GET /api/health`
 
 ## Notes
 
 - Allium API key is only used server-side.
+- ENS names are resolved server-side before querying Allium.
 - Contract creation timestamps depend on fields returned by the Allium contracts endpoint.

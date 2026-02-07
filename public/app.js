@@ -36,7 +36,7 @@ function renderTimeline(milestones) {
   if (!milestones.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "No matching events found for those contracts.";
+    empty.textContent = "No matching events were found for this wallet/contracts selection.";
     timelineEl.appendChild(empty);
     return;
   }
@@ -63,11 +63,12 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
 
   const artist = document.querySelector("#artist").value.trim() || "Artist";
+  const wallet = document.querySelector("#wallet").value.trim();
   const contracts = document.querySelector("#contracts").value.trim();
   const chain = document.querySelector("#chain").value.trim() || "ethereum";
 
-  if (!contracts) {
-    statusEl.textContent = "Enter at least one contract address.";
+  if (!wallet && !contracts) {
+    statusEl.textContent = "Enter a wallet/ENS or at least one contract address.";
     return;
   }
 
@@ -75,7 +76,9 @@ form.addEventListener("submit", async (event) => {
   statusEl.textContent = "Loading blockchain milestones...";
 
   try {
-    const query = new URLSearchParams({ artist, contracts, chain });
+    const query = new URLSearchParams({ artist, chain });
+    if (wallet) query.set("wallet", wallet);
+    if (contracts) query.set("contracts", contracts);
     const response = await fetch(`/api/timeline?${query}`);
     const data = await response.json();
 

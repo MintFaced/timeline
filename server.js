@@ -44,6 +44,16 @@ function parseAddressList(input) {
     .filter((item) => /^0x[a-f0-9]{40}$/.test(item));
 }
 
+function isHexAddress(value) {
+  return /^0x[a-f0-9]{40}$/.test(String(value || "").toLowerCase());
+}
+
+function normalizeAddress(value) {
+  if (!value) return null;
+  const lowered = String(value).trim().toLowerCase();
+  return isHexAddress(lowered) ? lowered : null;
+}
+
 function parseDate(value) {
   if (value == null) return null;
   const date = new Date(value);
@@ -111,6 +121,16 @@ function tokenLabel(event) {
   if (tokenId != null) return `Token #${tokenId}`;
   if (collection) return String(collection);
   return "Artwork";
+}
+
+function contractAddressFromEvent(event) {
+  return normalizeAddress(
+    firstPresent(event, ["contract_address", "token_address", "collection_address", "nft_address"])
+  );
+}
+
+function addressFromEvent(event, keys) {
+  return normalizeAddress(firstPresent(event, keys));
 }
 
 function formatUsd(value) {
@@ -191,6 +211,52 @@ async function fetchActivities({ chain, contracts, activityType }) {
   return batches.flat();
 }
 
+async function fetchWalletActivities({ chain, wallet }) {
+  const rows = [];
+  let cursor = null;
+
+  // Allium endpoint variants seen across API versions.
+  const endpointTemplates = [
+    `/nfts/activities/${chain}/wallet/${wallet}`,
+    `/nfts/activities/wallet/${chain}/${wallet}`,
+    `/nfts/activities/${chain}/${wallet}`
+  ];
+
+  let workingTemplate = null;
+
+  for (let page = 0; page < MAX_ACTIVITY_PAGES; page += 1) {
+    const query = {
+      limit: PAGE_SIZE,
+      cursor: cursor || undefined
+    };
+
+    let payload = null;
+    let lastError = null;
+
+    if (workingTemplate) {
+      payload = await alliumGet(workingTemplate, query);
+    } else {
+      for (const template of endpointTemplates) {
+        try {
+          payload = await alliumGet(template, query);
+          workingTemplate = template;
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (!payload && lastError) throw lastError;
+    }
+
+    const pageRows = alliumItems(payload);
+    rows.push(...pageRows);
+    cursor = payload?.cursor || null;
+    if (!cursor || pageRows.length < PAGE_SIZE) break;
+  }
+
+  return rows;
+}
+
 async function fetchContractRows({ chain, contracts }) {
   const rows = await Promise.all(
     contracts.map(async (contract) => {
@@ -204,6 +270,30 @@ async function fetchContractRows({ chain, contracts }) {
   );
 
   return rows.filter(Boolean);
+}
+
+async function resolveEnsName(name) {
+  const clean = String(name || "").trim().toLowerCase();
+  if (!clean.endsWith(".eth")) return null;
+
+  const endpoints = [
+    `https://api.ensideas.com/ens/resolve/${encodeURIComponent(clean)}`,
+    `https://api.ensdata.net/${encodeURIComponent(clean)}`
+  ];
+
+  for (const url of endpoints) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) continue;
+      const data = await response.json();
+      const addr = normalizeAddress(data?.address || data?.addr || data?.resolver_address);
+      if (addr) return addr;
+    } catch {
+      // Try next resolver.
+    }
+  }
+
+  return null;
 }
 
 function creationDate(contractRow) {
@@ -362,6 +452,134 @@ async function buildMilestones({ chain, contracts, artist }) {
   };
 }
 
+async function buildWalletMilestones({ chain, wallet, artist }) {
+  const walletLc = wallet.toLowerCase();
+  const activityRows = await fetchWalletActivities({ chain, wallet: walletLc });
+
+  const mintEvents = activityRows.filter(isMint);
+  const saleEvents = activityRows.filter(isSale);
+  const derivedContracts = [
+    ...new Set(activityRows.map(contractAddressFromEvent).filter(Boolean))
+  ];
+
+  const contractRows = derivedContracts.length
+    ? await fetchContractRows({ chain, contracts: derivedContracts })
+    : [];
+
+  const milestoneItems = [];
+
+  const genesisMint = mintEvents
+    .map((event) => ({ event, ts: eventTimestamp(event) }))
+    .filter((item) => item.ts)
+    .sort((a, b) => a.ts - b.ts)[0];
+
+  if (genesisMint) {
+    milestoneItems.push({
+      id: "genesis-mint",
+      date: genesisMint.ts.toISOString(),
+      title: "Genesis Mint",
+      detail: `${tokenLabel(genesisMint.event)} minted`,
+      kind: "mint"
+    });
+  }
+
+  for (const contract of derivedContracts) {
+    const row = contractRows.find((item) => {
+      const rowAddress = normalizeAddress(firstPresent(item, ["contract_address", "address"]));
+      return rowAddress === contract;
+    });
+
+    const timestamp = creationDate(row);
+    if (!timestamp) continue;
+
+    const label = String(firstPresent(row, ["collection_name", "name", "contract_name"]) || contract);
+    milestoneItems.push({
+      id: `contract-${contract}`,
+      date: timestamp.toISOString(),
+      title: "Smart Contract Created",
+      detail: label,
+      kind: "contract"
+    });
+  }
+
+  const salesWithDate = saleEvents
+    .map((event) => ({
+      event,
+      ts: eventTimestamp(event),
+      usd: usdValue(event),
+      from: addressFromEvent(event, ["from_address", "seller_address", "maker"]),
+      to: addressFromEvent(event, ["to_address", "buyer_address", "taker"])
+    }))
+    .filter((item) => item.ts)
+    .sort((a, b) => a.ts - b.ts);
+
+  if (salesWithDate.length) {
+    const firstSale = salesWithDate[0];
+    milestoneItems.push({
+      id: "first-sale",
+      date: firstSale.ts.toISOString(),
+      title: "First Sale",
+      detail: `${tokenLabel(firstSale.event)} sold for ${formatUsd(firstSale.usd)}`,
+      kind: "sale"
+    });
+
+    const biggestSale = [...salesWithDate]
+      .filter((item) => Number.isFinite(item.usd))
+      .sort((a, b) => b.usd - a.usd)[0];
+
+    if (biggestSale) {
+      milestoneItems.push({
+        id: "biggest-sale",
+        date: biggestSale.ts.toISOString(),
+        title: "Biggest Sale",
+        detail: `${tokenLabel(biggestSale.event)} sold for ${formatUsd(biggestSale.usd)}`,
+        kind: "sale"
+      });
+    }
+
+    const mostRecentSale = salesWithDate[salesWithDate.length - 1];
+    milestoneItems.push({
+      id: "recent-sale",
+      date: mostRecentSale.ts.toISOString(),
+      title: "Most Recent Sale",
+      detail: `${tokenLabel(mostRecentSale.event)} sold for ${formatUsd(mostRecentSale.usd)}`,
+      kind: "sale"
+    });
+
+    const soldByWalletEvents = salesWithDate
+      .filter((item) => item.from === walletLc)
+      .map((item) => item.event);
+    const peakSource = soldByWalletEvents.length ? soldByWalletEvents : salesWithDate.map((item) => item.event);
+    const peak = buildThreeMonthPeak(peakSource);
+
+    if (peak) {
+      milestoneItems.push({
+        id: "peak-quarter",
+        date: peak.start.toISOString(),
+        title: "Most Art Sold (3-Month Peak)",
+        detail: `${peak.count} pieces sold between ${peak.start.toLocaleDateString("en-US")} and ${peak.end.toLocaleDateString("en-US")}`,
+        kind: "volume"
+      });
+    }
+  }
+
+  const ordered = milestoneItems
+    .filter((item) => item.date)
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  return {
+    artist,
+    chain,
+    wallet: walletLc,
+    contracts: derivedContracts,
+    totals: {
+      mintCount: mintEvents.length,
+      saleCount: saleEvents.length
+    },
+    milestones: ordered
+  };
+}
+
 async function readPublicFile(urlPath) {
   const cleanPath = urlPath === "/" ? "/index.html" : urlPath;
   const safePath = path.normalize(cleanPath).replace(/^\.+/, "");
@@ -406,16 +624,24 @@ const server = http.createServer(async (req, res) => {
     }
 
     const contracts = parseAddressList(parsedUrl.searchParams.get("contracts"));
+    const walletInput = (parsedUrl.searchParams.get("wallet") || "").trim().toLowerCase();
     const chain = parsedUrl.searchParams.get("chain") || "ethereum";
     const artist = parsedUrl.searchParams.get("artist") || "Artist";
+    const ens = walletInput.endsWith(".eth") ? walletInput : null;
+    const wallet = normalizeAddress(walletInput) || (ens ? await resolveEnsName(ens) : null);
 
-    if (!contracts.length) {
-      json(res, 400, { error: "Provide one or more valid contract addresses" });
+    if (!wallet && !contracts.length) {
+      json(res, 400, {
+        error: "Provide a wallet address (.eth supported) or one or more contract addresses"
+      });
       return;
     }
 
     try {
-      const payload = await buildMilestones({ chain, contracts, artist });
+      const payload = wallet
+        ? await buildWalletMilestones({ chain, wallet, artist })
+        : await buildMilestones({ chain, contracts, artist });
+      if (ens) payload.walletName = ens;
       json(res, 200, payload);
     } catch (error) {
       json(res, 500, { error: error.message });

@@ -16,8 +16,9 @@
     <main>
       <h1>Artist Ethereum Timeline</h1>
       <p class="lead">
-        Visualize key collection milestones from Allium data: genesis mint, contract creation, first sale,
-        biggest sale, peak 3-month selling window, and latest sale.
+        Visualize key milestones from Allium data using an artist wallet or ENS name, with optional contract
+        filtering: genesis mint, contract creation, first sale, biggest sale, peak 3-month selling window,
+        and latest sale.
       </p>
 
       <section class="panel">
@@ -28,13 +29,17 @@
           </label>
 
           <label>
-            NFT Contract Addresses (comma separated)
+            Wallet Address or ENS
+            <input id="wallet" name="wallet" type="text" placeholder="0x... or mintface.eth" />
+          </label>
+
+          <label>
+            Optional NFT Contract Addresses (comma separated)
             <input
               id="contracts"
               name="contracts"
               type="text"
-              placeholder="Contract only, e.g. 0x...,0x..."
-              required
+              placeholder="Optional filter: 0x...,0x..."
             />
           </label>
 
