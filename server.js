@@ -98,25 +98,31 @@ function usdValue(event) {
 
 function isSale(event) {
   const type = String(
-    firstPresent(event, ["activity_type", "type", "event_type", "transaction_type"]) || ""
+    firstPresent(event, ["activity_type", "type", "event_type", "transaction_type", "operation"]) || ""
   ).toLowerCase();
 
   if (type.includes("sale")) return true;
+  if (type.includes("trade")) return true;
+  if (type.includes("listing")) return false;
   if (type.includes("mint")) return false;
   return usdValue(event) != null;
 }
 
 function isMint(event) {
   const type = String(
-    firstPresent(event, ["activity_type", "type", "event_type", "transaction_type"]) || ""
+    firstPresent(event, ["activity_type", "type", "event_type", "transaction_type", "operation"]) || ""
   ).toLowerCase();
 
-  return type.includes("mint");
+  if (!type.includes("mint")) return false;
+  const tokenId = firstPresent(event, ["token_id", "tokenId", "nft_id"]) || event?.asset?.token_id;
+  return tokenId != null || type.includes("nft");
 }
 
 function tokenLabel(event) {
-  const tokenId = firstPresent(event, ["token_id", "tokenId", "nft_id"]);
-  const collection = firstPresent(event, ["collection_name", "contract_name", "name"]);
+  const tokenId =
+    firstPresent(event, ["token_id", "tokenId", "nft_id"]) || event?.asset?.token_id || null;
+  const collection =
+    firstPresent(event, ["collection_name", "contract_name", "name"]) || event?.asset?.name || null;
   if (collection && tokenId != null) return `${collection} #${tokenId}`;
   if (tokenId != null) return `Token #${tokenId}`;
   if (collection) return String(collection);
@@ -125,12 +131,19 @@ function tokenLabel(event) {
 
 function contractAddressFromEvent(event) {
   return normalizeAddress(
-    firstPresent(event, ["contract_address", "token_address", "collection_address", "nft_address"])
+    firstPresent(event, ["contract_address", "token_address", "collection_address", "nft_address"]) ||
+      event?.asset?.token_address
   );
 }
 
 function addressFromEvent(event, keys) {
-  return normalizeAddress(firstPresent(event, keys));
+  return normalizeAddress(
+    firstPresent(event, keys) ||
+      event?.asset?.from_address ||
+      event?.asset?.to_address ||
+      event?.sender ||
+      event?.recipient
+  );
 }
 
 function formatUsd(value) {
@@ -165,6 +178,29 @@ async function alliumGet(endpoint, query = {}) {
       "Content-Type": "application/json",
       "X-API-KEY": ALLIUM_API_KEY
     }
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(`Allium ${response.status}: ${message.slice(0, 280)}`);
+  }
+
+  return response.json();
+}
+
+async function alliumPost(endpoint, body, query = {}) {
+  const url = new URL(`${ALLIUM_BASE_URL}${endpoint}`);
+  for (const [key, value] of Object.entries(query)) {
+    appendQueryParam(url, key, value);
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-KEY": ALLIUM_API_KEY
+    },
+    body: JSON.stringify(body)
   });
 
   if (!response.ok) {
@@ -215,43 +251,41 @@ async function fetchWalletActivities({ chain, wallet }) {
   const rows = [];
   let cursor = null;
 
-  // Allium endpoint variants seen across API versions.
-  const endpointTemplates = [
-    `/nfts/activities/${chain}/wallet/${wallet}`,
-    `/nfts/activities/wallet/${chain}/${wallet}`,
-    `/nfts/activities/${chain}/${wallet}`
-  ];
-
-  let workingTemplate = null;
-
   for (let page = 0; page < MAX_ACTIVITY_PAGES; page += 1) {
-    const query = {
-      limit: PAGE_SIZE,
-      cursor: cursor || undefined
-    };
+    const payload = await alliumPost(
+      "/wallet/transactions",
+      [{ chain, address: wallet }],
+      { limit: PAGE_SIZE, cursor: cursor || undefined }
+    );
 
-    let payload = null;
-    let lastError = null;
+    const txRows = alliumItems(payload);
+    for (const tx of txRows) {
+      const txTimestamp = tx?.block_timestamp || tx?.timestamp;
+      const txHash = tx?.hash || tx?.transaction_hash;
 
-    if (workingTemplate) {
-      payload = await alliumGet(workingTemplate, query);
-    } else {
-      for (const template of endpointTemplates) {
-        try {
-          payload = await alliumGet(template, query);
-          workingTemplate = template;
-          break;
-        } catch (error) {
-          lastError = error;
-        }
+      const transfers = Array.isArray(tx?.asset_transfers) ? tx.asset_transfers : [];
+      for (const transfer of transfers) {
+        const merged = {
+          ...transfer,
+          block_timestamp: transfer?.block_timestamp || txTimestamp,
+          transaction_hash: transfer?.transaction_hash || txHash
+        };
+        rows.push(merged);
       }
-      if (!payload && lastError) throw lastError;
+
+      const activities = Array.isArray(tx?.activities) ? tx.activities : [];
+      for (const activity of activities) {
+        const merged = {
+          ...activity,
+          block_timestamp: activity?.block_timestamp || txTimestamp,
+          transaction_hash: activity?.transaction_hash || txHash
+        };
+        rows.push(merged);
+      }
     }
 
-    const pageRows = alliumItems(payload);
-    rows.push(...pageRows);
     cursor = payload?.cursor || null;
-    if (!cursor || pageRows.length < PAGE_SIZE) break;
+    if (!cursor || txRows.length < PAGE_SIZE) break;
   }
 
   return rows;
