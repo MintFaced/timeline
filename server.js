@@ -27,8 +27,11 @@ if (fsSync.existsSync(envPath)) {
 const PORT = Number(process.env.PORT || 3000);
 const ALLIUM_API_KEY = process.env.ALLIUM_API_KEY;
 const ALLIUM_BASE_URL = "https://api.allium.so/api/v1/developer";
-const MAX_ACTIVITY_PAGES = 40;
-const PAGE_SIZE = 50;
+const MAX_CONTRACT_ACTIVITY_PAGES = 40;
+const CONTRACT_ACTIVITY_PAGE_SIZE = 100;
+const MAX_WALLET_TX_PAGES = 20;
+const WALLET_TX_PAGE_SIZE = 1000;
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
 
 function json(res, status, payload) {
@@ -172,17 +175,23 @@ async function alliumGet(endpoint, query = {}) {
     appendQueryParam(url, key, value);
   }
 
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-KEY": ALLIUM_API_KEY
-    }
-  });
+  let response = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-KEY": ALLIUM_API_KEY
+      }
+    });
 
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`Allium ${response.status}: ${message.slice(0, 280)}`);
+    if (response.ok) break;
+    if (!RETRYABLE_STATUSES.has(response.status) || attempt === 3) {
+      const message = await response.text();
+      throw new Error(`Allium ${response.status}: ${message.slice(0, 280)}`);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 450 * (attempt + 1)));
   }
 
   return response.json();
@@ -194,18 +203,24 @@ async function alliumPost(endpoint, body, query = {}) {
     appendQueryParam(url, key, value);
   }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-KEY": ALLIUM_API_KEY
-    },
-    body: JSON.stringify(body)
-  });
+  let response = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-API-KEY": ALLIUM_API_KEY
+      },
+      body: JSON.stringify(body)
+    });
 
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(`Allium ${response.status}: ${message.slice(0, 280)}`);
+    if (response.ok) break;
+    if (!RETRYABLE_STATUSES.has(response.status) || attempt === 3) {
+      const message = await response.text();
+      throw new Error(`Allium ${response.status}: ${message.slice(0, 280)}`);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 450 * (attempt + 1)));
   }
 
   return response.json();
@@ -224,9 +239,9 @@ async function fetchActivitiesForContract({ chain, contract, activityType }) {
   const rows = [];
   let cursor = null;
 
-  for (let page = 0; page < MAX_ACTIVITY_PAGES; page += 1) {
+  for (let page = 0; page < MAX_CONTRACT_ACTIVITY_PAGES; page += 1) {
     const payload = await alliumGet(`/nfts/activities/${chain}/${contract}`, {
-      limit: PAGE_SIZE,
+      limit: CONTRACT_ACTIVITY_PAGE_SIZE,
       activity_types: activityType ? [activityType] : undefined,
       cursor: cursor || undefined
     });
@@ -234,7 +249,7 @@ async function fetchActivitiesForContract({ chain, contract, activityType }) {
     const pageRows = alliumItems(payload);
     rows.push(...pageRows.map((row) => ({ ...row, contract_address: row.contract_address || contract })));
     cursor = payload?.cursor || null;
-    if (!cursor || pageRows.length < PAGE_SIZE) break;
+    if (!cursor || pageRows.length < CONTRACT_ACTIVITY_PAGE_SIZE) break;
   }
 
   return rows;
@@ -251,11 +266,11 @@ async function fetchWalletActivities({ chain, wallet }) {
   const rows = [];
   let cursor = null;
 
-  for (let page = 0; page < MAX_ACTIVITY_PAGES; page += 1) {
+  for (let page = 0; page < MAX_WALLET_TX_PAGES; page += 1) {
     const payload = await alliumPost(
       "/wallet/transactions",
       [{ chain, address: wallet }],
-      { limit: PAGE_SIZE, cursor: cursor || undefined }
+      { limit: WALLET_TX_PAGE_SIZE, cursor: cursor || undefined }
     );
 
     const txRows = alliumItems(payload);
@@ -285,7 +300,7 @@ async function fetchWalletActivities({ chain, wallet }) {
     }
 
     cursor = payload?.cursor || null;
-    if (!cursor || txRows.length < PAGE_SIZE) break;
+    if (!cursor || txRows.length < WALLET_TX_PAGE_SIZE) break;
   }
 
   return rows;
@@ -489,6 +504,10 @@ async function buildMilestones({ chain, contracts, artist }) {
 async function buildWalletMilestones({ chain, wallet, artist }) {
   const walletLc = wallet.toLowerCase();
   const activityRows = await fetchWalletActivities({ chain, wallet: walletLc });
+  const earliestWalletActivity = activityRows
+    .map((event) => eventTimestamp(event))
+    .filter(Boolean)
+    .sort((a, b) => a - b)[0];
 
   const mintEvents = activityRows.filter(isMint);
   const saleEvents = activityRows.filter(isSale);
@@ -549,11 +568,20 @@ async function buildWalletMilestones({ chain, wallet, artist }) {
 
   if (salesWithDate.length) {
     const firstSale = salesWithDate[0];
+    const shouldUseFallbackFirstSale =
+      earliestWalletActivity &&
+      firstSale &&
+      firstSale.ts.getTime() - earliestWalletActivity.getTime() > 120 * 24 * 60 * 60 * 1000;
+
     milestoneItems.push({
       id: "first-sale",
-      date: firstSale.ts.toISOString(),
+      date: shouldUseFallbackFirstSale
+        ? earliestWalletActivity.toISOString()
+        : firstSale.ts.toISOString(),
       title: "First Sale",
-      detail: `${tokenLabel(firstSale.event)} sold for ${formatUsd(firstSale.usd)}`,
+      detail: shouldUseFallbackFirstSale
+        ? "Earliest wallet market activity (older sale labels are sparse in API activity data)"
+        : `${tokenLabel(firstSale.event)} sold for ${formatUsd(firstSale.usd)}`,
       kind: "sale"
     });
 
