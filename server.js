@@ -26,9 +26,9 @@ if (fsSync.existsSync(envPath)) {
 
 const PORT = Number(process.env.PORT || 3000);
 const ALLIUM_API_KEY = process.env.ALLIUM_API_KEY;
-const ALLIUM_BASE_URL = "https://api.allium.so/api/v1/explorer";
+const ALLIUM_BASE_URL = "https://api.allium.so/api/v1/developer";
 const MAX_ACTIVITY_PAGES = 40;
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 50;
 const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
 
 function json(res, status, payload) {
@@ -122,14 +122,29 @@ function formatUsd(value) {
   }).format(value);
 }
 
-async function alliumPost(endpoint, payload) {
-  const response = await fetch(`${ALLIUM_BASE_URL}${endpoint}`, {
-    method: "POST",
+function appendQueryParam(url, key, value) {
+  if (value == null) return;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      url.searchParams.append(key, String(item));
+    }
+    return;
+  }
+  url.searchParams.set(key, String(value));
+}
+
+async function alliumGet(endpoint, query = {}) {
+  const url = new URL(`${ALLIUM_BASE_URL}${endpoint}`);
+  for (const [key, value] of Object.entries(query)) {
+    appendQueryParam(url, key, value);
+  }
+
+  const response = await fetch(url, {
+    method: "GET",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": ALLIUM_API_KEY
-    },
-    body: JSON.stringify(payload)
+      "X-API-KEY": ALLIUM_API_KEY
+    }
   });
 
   if (!response.ok) {
@@ -137,46 +152,58 @@ async function alliumPost(endpoint, payload) {
     throw new Error(`Allium ${response.status}: ${message.slice(0, 280)}`);
   }
 
-  const data = await response.json();
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.data)) return data.data;
-  if (Array.isArray(data?.results)) return data.results;
+  return response.json();
+}
+
+function alliumItems(payload) {
+  if (Array.isArray(payload?.items)) return payload.items;
+  if (Array.isArray(payload?.data?.items)) return payload.data.items;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.results)) return payload.results;
+  if (Array.isArray(payload)) return payload;
   return [];
 }
 
-async function fetchActivities({ chain, contracts, activityType }) {
+async function fetchActivitiesForContract({ chain, contract, activityType }) {
   const rows = [];
+  let cursor = null;
 
   for (let page = 0; page < MAX_ACTIVITY_PAGES; page += 1) {
-    const payload = {
-      blockchain: chain,
-      contract_addresses: contracts,
+    const payload = await alliumGet(`/nfts/activities/${chain}/${contract}`, {
       limit: PAGE_SIZE,
-      offset: page * PAGE_SIZE,
-      sort_by: "block_timestamp",
-      order: "asc"
-    };
+      activity_types: activityType ? [activityType] : undefined,
+      cursor: cursor || undefined
+    });
 
-    if (activityType) payload.activity_types = [activityType];
-
-    const pageRows = await alliumPost("/nfts/activities/contract", payload);
-    rows.push(...pageRows);
-    if (pageRows.length < PAGE_SIZE) break;
+    const pageRows = alliumItems(payload);
+    rows.push(...pageRows.map((row) => ({ ...row, contract_address: row.contract_address || contract })));
+    cursor = payload?.cursor || null;
+    if (!cursor || pageRows.length < PAGE_SIZE) break;
   }
 
   return rows;
 }
 
+async function fetchActivities({ chain, contracts, activityType }) {
+  const batches = await Promise.all(
+    contracts.map((contract) => fetchActivitiesForContract({ chain, contract, activityType }))
+  );
+  return batches.flat();
+}
+
 async function fetchContractRows({ chain, contracts }) {
-  try {
-    return await alliumPost("/nfts/contracts", {
-      blockchain: chain,
-      contract_addresses: contracts,
-      limit: contracts.length
-    });
-  } catch {
-    return [];
-  }
+  const rows = await Promise.all(
+    contracts.map(async (contract) => {
+      try {
+        const payload = await alliumGet(`/nfts/contracts/${chain}/${contract}`);
+        return payload?.data || payload;
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  return rows.filter(Boolean);
 }
 
 function creationDate(contractRow) {
