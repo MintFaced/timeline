@@ -1,11 +1,28 @@
 import http from "node:http";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "public");
+const envPath = path.join(__dirname, ".env");
+
+if (fsSync.existsSync(envPath)) {
+  const rawEnv = fsSync.readFileSync(envPath, "utf8");
+  for (const line of rawEnv.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const idx = trimmed.indexOf("=");
+    if (idx === -1) continue;
+    const key = trimmed.slice(0, idx).trim();
+    const value = trimmed.slice(idx + 1).trim();
+    if (key && process.env[key] == null) {
+      process.env[key] = value;
+    }
+  }
+}
 
 const PORT = Number(process.env.PORT || 3000);
 const ALLIUM_API_KEY = process.env.ALLIUM_API_KEY;
