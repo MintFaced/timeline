@@ -32,6 +32,8 @@ const CONTRACT_ACTIVITY_PAGE_SIZE = 100;
 const MAX_WALLET_TX_PAGES = 20;
 const WALLET_TX_PAGE_SIZE = 1000;
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+const RECENT_WINDOW_DAYS = 30;
+const PROVENANCE_LOOKBACK_DAYS = 365;
 const THREE_MONTHS_MS = 90 * 24 * 60 * 60 * 1000;
 
 function json(res, status, payload) {
@@ -137,6 +139,19 @@ function contractAddressFromEvent(event) {
     firstPresent(event, ["contract_address", "token_address", "collection_address", "nft_address"]) ||
       event?.asset?.token_address
   );
+}
+
+function tokenIdFromEvent(event) {
+  const id = firstPresent(event, ["token_id", "tokenId", "nft_id"]) || event?.asset?.token_id;
+  if (id == null) return null;
+  return String(id);
+}
+
+function tokenKeyFromEvent(event) {
+  const contract = contractAddressFromEvent(event);
+  const tokenId = tokenIdFromEvent(event);
+  if (!contract || tokenId == null) return null;
+  return `${contract}:${tokenId}`;
 }
 
 function addressFromEvent(event, keys) {
@@ -265,6 +280,8 @@ async function fetchActivities({ chain, contracts, activityType }) {
 async function fetchWalletActivities({ chain, wallet }) {
   const rows = [];
   let cursor = null;
+  const recentCutoffMs = Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const provenanceCutoffMs = Date.now() - PROVENANCE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
 
   for (let page = 0; page < MAX_WALLET_TX_PAGES; page += 1) {
     const payload = await alliumPost(
@@ -274,16 +291,30 @@ async function fetchWalletActivities({ chain, wallet }) {
     );
 
     const txRows = alliumItems(payload);
+    let oldestSeenOnPage = Number.POSITIVE_INFINITY;
+
     for (const tx of txRows) {
       const txTimestamp = tx?.block_timestamp || tx?.timestamp;
+      const txDate = parseDate(txTimestamp);
+      if (txDate) {
+        oldestSeenOnPage = Math.min(oldestSeenOnPage, txDate.getTime());
+      }
       const txHash = tx?.hash || tx?.transaction_hash;
+      const txActivityTypes = Array.isArray(tx?.activities)
+        ? tx.activities
+            .map((item) =>
+              String(firstPresent(item, ["activity_type", "type", "event_type", "operation"]) || "").toLowerCase()
+            )
+            .filter(Boolean)
+        : [];
 
       const transfers = Array.isArray(tx?.asset_transfers) ? tx.asset_transfers : [];
       for (const transfer of transfers) {
         const merged = {
           ...transfer,
           block_timestamp: transfer?.block_timestamp || txTimestamp,
-          transaction_hash: transfer?.transaction_hash || txHash
+          transaction_hash: transfer?.transaction_hash || txHash,
+          _tx_activity_types: txActivityTypes
         };
         rows.push(merged);
       }
@@ -293,7 +324,8 @@ async function fetchWalletActivities({ chain, wallet }) {
         const merged = {
           ...activity,
           block_timestamp: activity?.block_timestamp || txTimestamp,
-          transaction_hash: activity?.transaction_hash || txHash
+          transaction_hash: activity?.transaction_hash || txHash,
+          _tx_activity_types: txActivityTypes
         };
         rows.push(merged);
       }
@@ -301,6 +333,8 @@ async function fetchWalletActivities({ chain, wallet }) {
 
     cursor = payload?.cursor || null;
     if (!cursor || txRows.length < WALLET_TX_PAGE_SIZE) break;
+    if (oldestSeenOnPage <= provenanceCutoffMs) break;
+    if (oldestSeenOnPage <= recentCutoffMs && page >= 3) break;
   }
 
   return rows;
@@ -489,13 +523,18 @@ async function buildMilestones({ chain, contracts, artist }) {
     .filter((item) => item.date)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 
+  const soldCreatedCount = salesWithDate.filter((sale) => mintedTokenKeys.has(tokenKeyFromEvent(sale.event))).length;
+  const soldBoughtCount = salesWithDate.length - soldCreatedCount;
+
   return {
     artist,
     chain,
     contracts,
     totals: {
       mintCount: mintEvents.length,
-      saleCount: saleEvents.length
+      saleCount: saleEvents.length,
+      soldCreatedCount,
+      soldBoughtCount
     },
     milestones: ordered
   };
@@ -504,15 +543,42 @@ async function buildMilestones({ chain, contracts, artist }) {
 async function buildWalletMilestones({ chain, wallet, artist }) {
   const walletLc = wallet.toLowerCase();
   const activityRows = await fetchWalletActivities({ chain, wallet: walletLc });
-  const earliestWalletActivity = activityRows
-    .map((event) => eventTimestamp(event))
-    .filter(Boolean)
-    .sort((a, b) => a - b)[0];
+  const windowStart = new Date(Date.now() - RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000);
 
-  const mintEvents = activityRows.filter(isMint);
-  const saleEvents = activityRows.filter(isSale);
+  const saleEvents = activityRows.filter((event) => {
+    const ts = eventTimestamp(event);
+    if (!ts || ts < windowStart) return false;
+    const from = addressFromEvent(event, ["from_address", "seller_address", "maker"]);
+    if (from !== walletLc) return false;
+
+    const hasTradeSignal =
+      String(firstPresent(event, ["activity_type", "type", "event_type", "transaction_type", "operation"]) || "")
+        .toLowerCase()
+        .includes("trade") ||
+      String(firstPresent(event, ["activity_type", "type", "event_type", "transaction_type", "operation"]) || "")
+        .toLowerCase()
+        .includes("sale") ||
+      (Array.isArray(event?._tx_activity_types) && event._tx_activity_types.includes("nft_trade"));
+
+    const tokenKey = tokenKeyFromEvent(event);
+    return hasTradeSignal && Boolean(tokenKey);
+  });
+
+  const mintEvents = activityRows.filter((event) => {
+    const ts = eventTimestamp(event);
+    return Boolean(ts && ts >= windowStart && isMint(event));
+  });
+
   const derivedContracts = [
-    ...new Set(activityRows.map(contractAddressFromEvent).filter(Boolean))
+    ...new Set(
+      activityRows
+        .filter((event) => {
+          const ts = eventTimestamp(event);
+          return Boolean(ts && ts >= windowStart);
+        })
+        .map(contractAddressFromEvent)
+        .filter(Boolean)
+    )
   ];
 
   const contractRows = derivedContracts.length
@@ -520,21 +586,12 @@ async function buildWalletMilestones({ chain, wallet, artist }) {
     : [];
 
   const milestoneItems = [];
-
-  const genesisMint = mintEvents
-    .map((event) => ({ event, ts: eventTimestamp(event) }))
-    .filter((item) => item.ts)
-    .sort((a, b) => a.ts - b.ts)[0];
-
-  if (genesisMint) {
-    milestoneItems.push({
-      id: "genesis-mint",
-      date: genesisMint.ts.toISOString(),
-      title: "Genesis Mint",
-      detail: `${tokenLabel(genesisMint.event)} minted`,
-      kind: "mint"
-    });
-  }
+  const mintedTokenKeys = new Set(
+    activityRows
+      .filter(isMint)
+      .map((event) => tokenKeyFromEvent(event))
+      .filter(Boolean)
+  );
 
   for (const contract of derivedContracts) {
     const row = contractRows.find((item) => {
@@ -543,13 +600,13 @@ async function buildWalletMilestones({ chain, wallet, artist }) {
     });
 
     const timestamp = creationDate(row);
-    if (!timestamp) continue;
+    if (!timestamp || timestamp < windowStart) continue;
 
     const label = String(firstPresent(row, ["collection_name", "name", "contract_name"]) || contract);
     milestoneItems.push({
       id: `contract-${contract}`,
       date: timestamp.toISOString(),
-      title: "Smart Contract Created",
+      title: "New Smart Contract Launched",
       detail: label,
       kind: "contract"
     });
@@ -559,6 +616,7 @@ async function buildWalletMilestones({ chain, wallet, artist }) {
     .map((event) => ({
       event,
       ts: eventTimestamp(event),
+      transactionHash: firstPresent(event, ["transaction_hash", "tx_hash", "hash"]),
       usd: usdValue(event),
       from: addressFromEvent(event, ["from_address", "seller_address", "maker"]),
       to: addressFromEvent(event, ["to_address", "buyer_address", "taker"])
@@ -566,61 +624,44 @@ async function buildWalletMilestones({ chain, wallet, artist }) {
     .filter((item) => item.ts)
     .sort((a, b) => a.ts - b.ts);
 
+  const salesByDay = new Map();
+  for (const sale of salesWithDate) {
+    const day = sale.ts.toISOString().slice(0, 10);
+    const prev = salesByDay.get(day) || { count: 0, usd: 0 };
+    prev.count += 1;
+    if (Number.isFinite(sale.usd)) prev.usd += sale.usd;
+    salesByDay.set(day, prev);
+  }
+
+  const biggestSaleDay = [...salesByDay.entries()].sort((a, b) => {
+    if (b[1].usd !== a[1].usd) return b[1].usd - a[1].usd;
+    return b[1].count - a[1].count;
+  })[0];
+
+  if (biggestSaleDay) {
+    const [day, stats] = biggestSaleDay;
+    milestoneItems.push({
+      id: `biggest-sale-day-${day}`,
+      date: new Date(`${day}T00:00:00.000Z`).toISOString(),
+      title: "Biggest Sale Day",
+      detail: `${stats.count} sales totaling ${formatUsd(stats.usd)} on ${new Date(`${day}T00:00:00.000Z`).toLocaleDateString("en-US")}`,
+      kind: "sale"
+    });
+  }
+
   if (salesWithDate.length) {
-    const firstSale = salesWithDate[0];
-    const shouldUseFallbackFirstSale =
-      earliestWalletActivity &&
-      firstSale &&
-      firstSale.ts.getTime() - earliestWalletActivity.getTime() > 120 * 24 * 60 * 60 * 1000;
+    for (const sale of salesWithDate) {
+      const tokenKey = tokenKeyFromEvent(sale.event);
+      const categoryTitle = mintedTokenKeys.has(tokenKey)
+        ? "Token Sold (Created by Wallet)"
+        : "Token Sold (Previously Bought)";
 
-    milestoneItems.push({
-      id: "first-sale",
-      date: shouldUseFallbackFirstSale
-        ? earliestWalletActivity.toISOString()
-        : firstSale.ts.toISOString(),
-      title: "First Sale",
-      detail: shouldUseFallbackFirstSale
-        ? "Earliest wallet market activity (older sale labels are sparse in API activity data)"
-        : `${tokenLabel(firstSale.event)} sold for ${formatUsd(firstSale.usd)}`,
-      kind: "sale"
-    });
-
-    const biggestSale = [...salesWithDate]
-      .filter((item) => Number.isFinite(item.usd))
-      .sort((a, b) => b.usd - a.usd)[0];
-
-    if (biggestSale) {
       milestoneItems.push({
-        id: "biggest-sale",
-        date: biggestSale.ts.toISOString(),
-        title: "Biggest Sale",
-        detail: `${tokenLabel(biggestSale.event)} sold for ${formatUsd(biggestSale.usd)}`,
+        id: `${sale.transactionHash || sale.ts.toISOString()}-${tokenKey || "sale"}`,
+        date: sale.ts.toISOString(),
+        title: categoryTitle,
+        detail: `${tokenLabel(sale.event)} sold for ${formatUsd(sale.usd)}`,
         kind: "sale"
-      });
-    }
-
-    const mostRecentSale = salesWithDate[salesWithDate.length - 1];
-    milestoneItems.push({
-      id: "recent-sale",
-      date: mostRecentSale.ts.toISOString(),
-      title: "Most Recent Sale",
-      detail: `${tokenLabel(mostRecentSale.event)} sold for ${formatUsd(mostRecentSale.usd)}`,
-      kind: "sale"
-    });
-
-    const soldByWalletEvents = salesWithDate
-      .filter((item) => item.from === walletLc)
-      .map((item) => item.event);
-    const peakSource = soldByWalletEvents.length ? soldByWalletEvents : salesWithDate.map((item) => item.event);
-    const peak = buildThreeMonthPeak(peakSource);
-
-    if (peak) {
-      milestoneItems.push({
-        id: "peak-quarter",
-        date: peak.start.toISOString(),
-        title: "Most Art Sold (3-Month Peak)",
-        detail: `${peak.count} pieces sold between ${peak.start.toLocaleDateString("en-US")} and ${peak.end.toLocaleDateString("en-US")}`,
-        kind: "volume"
       });
     }
   }
@@ -634,6 +675,10 @@ async function buildWalletMilestones({ chain, wallet, artist }) {
     chain,
     wallet: walletLc,
     contracts: derivedContracts,
+    window: {
+      days: RECENT_WINDOW_DAYS,
+      start: windowStart.toISOString()
+    },
     totals: {
       mintCount: mintEvents.length,
       saleCount: saleEvents.length

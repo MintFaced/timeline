@@ -17,9 +17,11 @@ function renderMetrics(data) {
   metricsEl.innerHTML = "";
 
   const metrics = [
+    `Last ${data.window?.days || 30} days`,
     `${data.milestones.length} milestones`,
-    `${data.totals.mintCount} mint events`,
-    `${data.totals.saleCount} sale events`
+    `${data.totals.saleCount} sale events`,
+    `${data.totals.soldCreatedCount || 0} sold (created)`,
+    `${data.totals.soldBoughtCount || 0} sold (bought)`
   ];
 
   for (const label of metrics) {
@@ -73,7 +75,7 @@ form.addEventListener("submit", async (event) => {
   }
 
   button.disabled = true;
-  statusEl.textContent = "Loading blockchain milestones...";
+  statusEl.textContent = "Loading 30-day blockchain milestones...";
 
   try {
     const query = new URLSearchParams({ artist, chain });
