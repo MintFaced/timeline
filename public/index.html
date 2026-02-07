@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Artist Chain Timeline</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Artist Ethereum Timeline</h1>
+      <p class="lead">
+        Visualize key collection milestones from Allium data: genesis mint, contract creation, first sale,
+        biggest sale, peak 3-month selling window, and latest sale.
+      </p>
+
+      <section class="panel">
+        <form id="timeline-form" class="form-grid">
+          <label>
+            Artist Name
+            <input id="artist" name="artist" type="text" placeholder="Refik Anadol" />
+          </label>
+
+          <label>
+            Contract Addresses (comma separated)
+            <input
+              id="contracts"
+              name="contracts"
+              type="text"
+              placeholder="0x...,0x..."
+              required
+            />
+          </label>
+
+          <label>
+            Chain
+            <input id="chain" name="chain" type="text" value="ethereum" />
+          </label>
+
+          <button id="load-button" type="submit">Build Timeline</button>
+        </form>
+
+        <p id="status" class="notice">Ready.</p>
+        <div id="metrics" class="metrics" aria-live="polite"></div>
+      </section>
+
+      <section class="timeline-wrap" aria-label="Timeline output">
+        <div id="timeline" class="timeline"></div>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

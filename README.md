@@ -1,0 +1,34 @@
+# Artist Timeline (Allium + Ethereum)
+
+Minimal web app that builds a left-to-right timeline of milestone events for one or more Ethereum NFT contracts.
+
+## Milestones
+
+- Genesis mint date
+- Smart contract creation dates (when available from Allium contract metadata)
+- First sale
+- Biggest sale
+- Most art sold in a rolling 3-month window
+- Most recent sale
+
+## Setup
+
+1. Copy `.env.example` to `.env`.
+2. Add your `ALLIUM_API_KEY` to `.env`.
+3. Start the app:
+
+```bash
+npm run start
+```
+
+Then open `http://localhost:3000`.
+
+## API
+
+- `GET /api/timeline?artist=Name&chain=ethereum&contracts=0x...,0x...`
+- `GET /api/health`
+
+## Notes
+
+- Allium API key is only used server-side.
+- Contract creation timestamps depend on fields returned by the Allium contracts endpoint.
