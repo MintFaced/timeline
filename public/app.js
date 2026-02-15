@@ -1,101 +1,171 @@
-const form = document.querySelector("#timeline-form");
-const statusEl = document.querySelector("#status");
-const timelineEl = document.querySelector("#timeline");
-const metricsEl = document.querySelector("#metrics");
-const button = document.querySelector("#load-button");
+// =====================================================================
+// Stories We Keep — Frontend
+// =====================================================================
 
-function fmtDate(dateIso) {
-  const date = new Date(dateIso);
-  return date.toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric"
-  });
-}
+(async function () {
+  "use strict";
 
-function renderMetrics(data) {
-  metricsEl.innerHTML = "";
-
-  const metrics = [
-    `Last ${data.window?.days || 30} days`,
-    `${data.milestones.length} milestones`,
-    `${data.totals.saleCount} sale events`,
-    `${data.totals.soldCreatedCount || 0} sold (created)`,
-    `${data.totals.soldBoughtCount || 0} sold (bought)`
-  ];
-
-  for (const label of metrics) {
-    const node = document.createElement("div");
-    node.className = "metric";
-    node.textContent = label;
-    metricsEl.appendChild(node);
-  }
-}
-
-function renderTimeline(milestones) {
-  timelineEl.innerHTML = "";
-
-  if (!milestones.length) {
-    const empty = document.createElement("p");
-    empty.className = "empty";
-    empty.textContent = "No matching events were found for this wallet/contracts selection.";
-    timelineEl.appendChild(empty);
-    return;
-  }
-
-  milestones.forEach((milestone, idx) => {
-    const node = document.createElement("article");
-    node.className = "milestone";
-    node.style.animationDelay = `${idx * 45}ms`;
-
-    node.innerHTML = `
-      <div class="dot" aria-hidden="true"></div>
-      <div class="card">
-        <time>${fmtDate(milestone.date)}</time>
-        <h3>${milestone.title}</h3>
-        <p>${milestone.detail}</p>
-      </div>
-    `;
-
-    timelineEl.appendChild(node);
-  });
-}
-
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  const artist = document.querySelector("#artist").value.trim() || "Artist";
-  const wallet = document.querySelector("#wallet").value.trim();
-  const contracts = document.querySelector("#contracts").value.trim();
-  const chain = document.querySelector("#chain").value.trim() || "ethereum";
-
-  if (!wallet && !contracts) {
-    statusEl.textContent = "Enter a wallet/ENS or at least one contract address.";
-    return;
-  }
-
-  button.disabled = true;
-  statusEl.textContent = "Loading 30-day blockchain milestones...";
+  // -------------------------------------------------------------------
+  // Load config from server
+  // -------------------------------------------------------------------
+  let config = {
+    stripePublishableKey: null,
+    calendlyUrl: "https://calendly.com",
+    priceAmount: 29900,
+    priceCurrency: "usd",
+  };
 
   try {
-    const query = new URLSearchParams({ artist, chain });
-    if (wallet) query.set("wallet", wallet);
-    if (contracts) query.set("contracts", contracts);
-    const response = await fetch(`/api/timeline?${query}`);
-    const data = await response.json();
+    const res = await fetch("/api/config");
+    if (res.ok) config = await res.json();
+  } catch {
+    // Use defaults
+  }
 
-    if (!response.ok) {
-      throw new Error(data.error || "Failed to load timeline");
+  // -------------------------------------------------------------------
+  // Price display
+  // -------------------------------------------------------------------
+  const priceEl = document.getElementById("price-display");
+  if (priceEl && config.priceAmount) {
+    const formatted = new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: config.priceCurrency || "usd",
+      maximumFractionDigits: 0,
+    }).format(config.priceAmount / 100);
+    priceEl.textContent = formatted;
+  }
+
+  // -------------------------------------------------------------------
+  // Stripe Checkout
+  // -------------------------------------------------------------------
+  const checkoutBtn = document.getElementById("checkout-btn");
+  if (checkoutBtn) {
+    checkoutBtn.addEventListener("click", async () => {
+      checkoutBtn.disabled = true;
+      checkoutBtn.textContent = "Redirecting...";
+
+      try {
+        const res = await fetch("/api/checkout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+
+        const data = await res.json();
+
+        if (data.url) {
+          window.location.href = data.url;
+        } else {
+          throw new Error(data.error || "Could not start checkout");
+        }
+      } catch (err) {
+        checkoutBtn.disabled = false;
+        checkoutBtn.textContent = "Book & Pay";
+        console.error("Checkout error:", err);
+        alert("Something went wrong. Please try again or use the scheduler below to book.");
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Calendly embed
+  // -------------------------------------------------------------------
+  const calendlyContainer = document.getElementById("calendly-container");
+  const calendlyPlaceholder = document.getElementById("calendly-placeholder");
+
+  if (calendlyContainer && config.calendlyUrl) {
+    function initCalendly() {
+      if (typeof Calendly === "undefined") return false;
+
+      if (calendlyPlaceholder) calendlyPlaceholder.remove();
+
+      Calendly.initInlineWidget({
+        url: config.calendlyUrl,
+        parentElement: calendlyContainer,
+        prefill: {},
+        utm: {},
+      });
+
+      const iframe = calendlyContainer.querySelector("iframe");
+      if (iframe) {
+        iframe.style.minWidth = "100%";
+        iframe.style.minHeight = "660px";
+      }
+
+      return true;
     }
 
-    statusEl.textContent = `Timeline ready for ${data.artist}.`;
-    renderMetrics(data);
-    renderTimeline(data.milestones);
-  } catch (error) {
-    timelineEl.innerHTML = "";
-    metricsEl.innerHTML = "";
-    statusEl.textContent = error.message;
-  } finally {
-    button.disabled = false;
+    // Try immediately, then poll for Calendly script
+    if (!initCalendly()) {
+      let attempts = 0;
+      const poll = setInterval(() => {
+        attempts++;
+        if (initCalendly() || attempts > 40) clearInterval(poll);
+      }, 250);
+    }
   }
-});
+
+  // -------------------------------------------------------------------
+  // Mobile nav toggle
+  // -------------------------------------------------------------------
+  const navToggle = document.getElementById("nav-toggle");
+  const navLinks = document.getElementById("nav-links");
+
+  if (navToggle && navLinks) {
+    navToggle.addEventListener("click", () => {
+      navToggle.classList.toggle("nav__toggle--active");
+      navLinks.classList.toggle("nav__links--open");
+    });
+
+    // Close menu on link click
+    navLinks.querySelectorAll("a").forEach((link) => {
+      link.addEventListener("click", () => {
+        navToggle.classList.remove("nav__toggle--active");
+        navLinks.classList.remove("nav__links--open");
+      });
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Scroll-reveal animation
+  // -------------------------------------------------------------------
+  const revealTargets = document.querySelectorAll(
+    ".step, .feature, .pricing-card, .faq, .interlude__title, .interlude__text"
+  );
+
+  revealTargets.forEach((el) => el.classList.add("reveal"));
+
+  if ("IntersectionObserver" in window) {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("reveal--visible");
+            observer.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.15, rootMargin: "0px 0px -40px 0px" }
+    );
+
+    revealTargets.forEach((el) => observer.observe(el));
+  } else {
+    // Fallback: just show everything
+    revealTargets.forEach((el) => el.classList.add("reveal--visible"));
+  }
+
+  // -------------------------------------------------------------------
+  // Smooth scroll for anchor links (fallback for older browsers)
+  // -------------------------------------------------------------------
+  document.querySelectorAll('a[href^="#"]').forEach((anchor) => {
+    anchor.addEventListener("click", (e) => {
+      const targetId = anchor.getAttribute("href");
+      if (targetId === "#") return;
+      const target = document.querySelector(targetId);
+      if (target) {
+        e.preventDefault();
+        target.scrollIntoView({ behavior: "smooth" });
+      }
+    });
+  });
+})();

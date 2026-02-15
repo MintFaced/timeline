@@ -1,36 +1,44 @@
-# Artist Timeline (Allium + Ethereum)
+# Stories We Keep
 
-Minimal web app that builds a left-to-right timeline of milestone events for an Ethereum artist wallet (or `.eth`
-name), focused on the most recent 30 days.
-
-## Milestones
-
-- Biggest sale day
-- New smart contracts launched
-- Token sales where the wallet sold art it created
-- Token sales where the wallet sold art it previously bought
+Preserve the voices you love. We sit with your parents and grandparents, record their stories, and give you a private audio keepsake to treasure forever.
 
 ## Setup
 
-1. Copy `.env.example` to `.env`.
-2. Add your `ALLIUM_API_KEY` to `.env`.
-3. Start the app:
+1. Copy `.env.example` to `.env` and fill in your keys:
 
 ```bash
-npm run start
+cp .env.example .env
+```
+
+2. Install dependencies:
+
+```bash
+npm install
+```
+
+3. Start the server:
+
+```bash
+npm start
 ```
 
 Then open `http://localhost:3000`.
 
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `PORT` | Server port (default: 3000) |
+| `STRIPE_SECRET_KEY` | Stripe secret key for payments |
+| `STRIPE_PUBLISHABLE_KEY` | Stripe publishable key (sent to frontend) |
+| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret |
+| `CALENDLY_URL` | Your Calendly scheduling link |
+| `PRICE_AMOUNT` | Price in cents (default: 29900 = $299) |
+| `PRICE_CURRENCY` | Currency code (default: usd) |
+
 ## API
 
-- `GET /api/timeline?artist=Name&chain=ethereum&wallet=mintface.eth`
-- `GET /api/timeline?artist=Name&chain=ethereum&wallet=0x...&contracts=0x...,0x...`
-- `GET /api/health`
-
-## Notes
-
-- Allium API key is only used server-side.
-- ENS names are resolved server-side before querying Allium.
-- Contract creation timestamps depend on fields returned by the Allium contracts endpoint.
-- Wallet timelines are limited to the last 30 days, with additional lookback for token provenance.
+- `GET /api/health` — Health check
+- `GET /api/config` — Frontend configuration (publishable key, Calendly URL, price)
+- `POST /api/checkout` — Create a Stripe Checkout session
+- `POST /api/webhook` — Stripe webhook endpoint
