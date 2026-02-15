@@ -9,10 +9,8 @@
   // Load config from server
   // -------------------------------------------------------------------
   let config = {
-    stripePublishableKey: null,
     calendlyUrl: "https://calendly.com",
-    priceAmount: 29900,
-    priceCurrency: "usd",
+    stripePaymentLink: null,
   };
 
   try {
@@ -23,48 +21,11 @@
   }
 
   // -------------------------------------------------------------------
-  // Price display
-  // -------------------------------------------------------------------
-  const priceEl = document.getElementById("price-display");
-  if (priceEl && config.priceAmount) {
-    const formatted = new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: config.priceCurrency || "usd",
-      maximumFractionDigits: 0,
-    }).format(config.priceAmount / 100);
-    priceEl.textContent = formatted;
-  }
-
-  // -------------------------------------------------------------------
-  // Stripe Checkout
+  // Payment link — set checkout button URL
   // -------------------------------------------------------------------
   const checkoutBtn = document.getElementById("checkout-btn");
-  if (checkoutBtn) {
-    checkoutBtn.addEventListener("click", async () => {
-      checkoutBtn.disabled = true;
-      checkoutBtn.textContent = "Redirecting...";
-
-      try {
-        const res = await fetch("/api/checkout", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
-        });
-
-        const data = await res.json();
-
-        if (data.url) {
-          window.location.href = data.url;
-        } else {
-          throw new Error(data.error || "Could not start checkout");
-        }
-      } catch (err) {
-        checkoutBtn.disabled = false;
-        checkoutBtn.textContent = "Book & Pay";
-        console.error("Checkout error:", err);
-        alert("Something went wrong. Please try again or use the scheduler below to book.");
-      }
-    });
+  if (checkoutBtn && config.stripePaymentLink) {
+    checkoutBtn.href = config.stripePaymentLink;
   }
 
   // -------------------------------------------------------------------

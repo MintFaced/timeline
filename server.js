@@ -28,24 +28,8 @@ if (fsSync.existsSync(envPath)) {
 }
 
 const PORT = Number(process.env.PORT || 3000);
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
-const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY;
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const CALENDLY_URL = process.env.CALENDLY_URL || "https://calendly.com";
-const PRICE_AMOUNT = Number(process.env.PRICE_AMOUNT || 29900); // $299.00
-const PRICE_CURRENCY = process.env.PRICE_CURRENCY || "usd";
-
-// ---------------------------------------------------------------------------
-// Stripe (lazy-loaded)
-// ---------------------------------------------------------------------------
-let stripe = null;
-async function getStripe() {
-  if (stripe) return stripe;
-  if (!STRIPE_SECRET_KEY) return null;
-  const Stripe = (await import("stripe")).default;
-  stripe = new Stripe(STRIPE_SECRET_KEY);
-  return stripe;
-}
+const STRIPE_PAYMENT_LINK = process.env.STRIPE_PAYMENT_LINK || "";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,15 +40,6 @@ function json(res, status, payload) {
     "Access-Control-Allow-Origin": "*",
   });
   res.end(JSON.stringify(payload));
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
 }
 
 const MIME_TYPES = {
@@ -119,7 +94,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     });
     res.end();
@@ -135,93 +110,9 @@ const server = http.createServer(async (req, res) => {
   // Config endpoint — gives the frontend what it needs
   if (req.method === "GET" && pathname === "/api/config") {
     json(res, 200, {
-      stripePublishableKey: STRIPE_PUBLISHABLE_KEY || null,
       calendlyUrl: CALENDLY_URL,
-      priceAmount: PRICE_AMOUNT,
-      priceCurrency: PRICE_CURRENCY,
+      stripePaymentLink: STRIPE_PAYMENT_LINK || null,
     });
-    return;
-  }
-
-  // Create Stripe Checkout session
-  if (req.method === "POST" && pathname === "/api/checkout") {
-    const stripeClient = await getStripe();
-    if (!stripeClient) {
-      json(res, 500, { error: "Stripe is not configured" });
-      return;
-    }
-
-    try {
-      const body = await readBody(req);
-      const data = JSON.parse(body.toString() || "{}");
-      const customerEmail = data.email || undefined;
-
-      const origin = `${req.headers["x-forwarded-proto"] || "http"}://${req.headers.host}`;
-
-      const session = await stripeClient.checkout.sessions.create({
-        mode: "payment",
-        payment_method_types: ["card"],
-        customer_email: customerEmail,
-        line_items: [
-          {
-            price_data: {
-              currency: PRICE_CURRENCY,
-              product_data: {
-                name: "Stories We Keep — Recording Session",
-                description:
-                  "A one-hour in-person recording session to capture your loved one's stories, memories, and wisdom. Delivered as a private audio keepsake.",
-              },
-              unit_amount: PRICE_AMOUNT,
-            },
-            quantity: 1,
-          },
-        ],
-        success_url: `${origin}/success.html?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${origin}/#pricing`,
-      });
-
-      json(res, 200, { url: session.url });
-    } catch (err) {
-      json(res, 500, { error: err.message });
-    }
-    return;
-  }
-
-  // Stripe webhook
-  if (req.method === "POST" && pathname === "/api/webhook") {
-    const stripeClient = await getStripe();
-    if (!stripeClient) {
-      json(res, 500, { error: "Stripe is not configured" });
-      return;
-    }
-
-    try {
-      const rawBody = await readBody(req);
-      const sig = req.headers["stripe-signature"];
-
-      let event;
-      if (STRIPE_WEBHOOK_SECRET && sig) {
-        event = stripeClient.webhooks.constructEvent(
-          rawBody,
-          sig,
-          STRIPE_WEBHOOK_SECRET
-        );
-      } else {
-        event = JSON.parse(rawBody.toString());
-      }
-
-      if (event.type === "checkout.session.completed") {
-        const session = event.data.object;
-        console.log(
-          `Payment received from ${session.customer_email || "unknown"} — ${session.amount_total / 100} ${session.currency}`
-        );
-      }
-
-      json(res, 200, { received: true });
-    } catch (err) {
-      console.error("Webhook error:", err.message);
-      json(res, 400, { error: err.message });
-    }
     return;
   }
 
